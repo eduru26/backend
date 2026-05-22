@@ -1,0 +1,5 @@
+# Always LF in the repo — shell scripts break with CRLF inside containers
+*.sh text eol=lf
+
+# Default: let Git decide
+* text=auto

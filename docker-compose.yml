@@ -1,0 +1,248 @@
+services:
+
+  # ── PostgreSQL 16 + pgvector ────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: ai_mentor_postgres
+    environment:
+      POSTGRES_USER: mentor
+      POSTGRES_PASSWORD: mentor
+      POSTGRES_DB: ai_mentor
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mentor -d ai_mentor"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # ── Redis — caching + rate-limit counters + arq job queue ──
+  redis:
+    image: redis:7-alpine
+    container_name: ai_mentor_redis
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # ── Ollama (local LLM server) ───────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ai_mentor_ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # ── Pull chat model (qwen2.5:7b) ───────────────────────
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: ai_mentor_ollama_init
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["/bin/ollama", "pull", "qwen2.5:7b"]
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: "no"
+
+  # ── Pull Dr.Doc model (qwen2.5:3b) ─────────────────────
+  dr-doc-init:
+    image: ollama/ollama:latest
+    container_name: ai_mentor_dr_doc_init
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["/bin/ollama", "pull", "qwen2.5:3b"]
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: "no"
+
+  # ── Pull embedding model (RAG retriever, 768-d) ────────
+  # Pulls whatever OLLAMA_EMBED_MODEL is set to in .env so the model
+  # the app uses and the model that gets pulled never drift apart.
+  ollama-embed-init:
+    image: ollama/ollama:latest
+    container_name: ai_mentor_ollama_embed_init
+    depends_on:
+      ollama:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint:
+      - /bin/sh
+      - -c
+      - "/bin/ollama pull ${OLLAMA_EMBED_MODEL:-nomic-embed-text}"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: "no"
+
+  # ── Converter microservice (Excel/CSV → normalised CSV) ──
+  converter:
+    build:
+      context: ./converter
+      dockerfile: Dockerfile
+    container_name: ai_mentor_converter
+    ports:
+      - "9000:9000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:9000/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # ── DB migrations — one-shot, runs before backend/worker ──
+  # Dedicated service so scaling the backend to N replicas never runs N
+  # concurrent `alembic upgrade` against the same database.
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ai_mentor_migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://mentor:mentor@postgres:5432/ai_mentor
+      DATABASE_URL_SYNC: postgresql+psycopg://mentor:mentor@postgres:5432/ai_mentor
+    entrypoint: ["python", "-m", "alembic", "upgrade", "head"]
+    restart: "no"
+
+  # ── FastAPI backend — horizontally scaled behind nginx ────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # No container_name / no host port: this service runs as N replicas,
+    # reached only through the nginx load balancer.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      ollama-init:
+        condition: service_completed_successfully
+      dr-doc-init:
+        condition: service_completed_successfully
+      ollama-embed-init:
+        condition: service_completed_successfully
+      converter:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://mentor:mentor@postgres:5432/ai_mentor
+      DATABASE_URL_SYNC: postgresql+psycopg://mentor:mentor@postgres:5432/ai_mentor
+      OLLAMA_BASE_URL: http://ollama:11434
+      CONVERTER_URL: http://converter:9000
+      REDIS_URL: redis://redis:6379/0
+      REDIS_RATELIMIT_URL: redis://redis:6379/1
+      REDIS_ARQ_URL: redis://redis:6379/2
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: any
+      # Swarm honours these; `docker compose up` honours `replicas` and
+      # ignores `resources` limits unless `--compatibility` is passed.
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 1024M
+
+  # ── arq worker — durable background jobs ──────────────────
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      ollama-embed-init:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://mentor:mentor@postgres:5432/ai_mentor
+      DATABASE_URL_SYNC: postgresql+psycopg://mentor:mentor@postgres:5432/ai_mentor
+      OLLAMA_BASE_URL: http://ollama:11434
+      CONVERTER_URL: http://converter:9000
+      REDIS_URL: redis://redis:6379/0
+      REDIS_ARQ_URL: redis://redis:6379/2
+    entrypoint: ["arq", "backend.worker.settings.WorkerSettings"]
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+
+  # ── nginx — API gateway + load balancer ───────────────────
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: ai_mentor_gateway
+    depends_on:
+      - backend
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    healthcheck:
+      # 127.0.0.1, not localhost: inside the container `localhost` may
+      # resolve to ::1 first, and nginx listens on IPv4 only.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/gateway/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  ollama_data:
+  redis_data:

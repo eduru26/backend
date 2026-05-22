@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.pyo
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Dev tools
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Secrets — never bake into image
+.env
+.env.local
+.env.*.local
+
+# VCS
+.git/
+.gitignore
+.gitattributes
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude Code
+.claude/
+
+# Not needed in backend container
+lms-main/
+ai_mentor/
+frappe-learning/
+
+# Docs (optional — keeps image smaller)
+docs/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,6 @@
+handle,full_name,grade,section,parent_email
+S001,Aarav Sharma,8,A,parent.aarav@example.com
+S002,Diya Patel,8,A,parent.diya@example.com
+S003,Kabir Singh,8,B,parent.kabir@example.com
+S004,Meera Iyer,8,B,
+S005,Rohan Gupta,9,A,parent.rohan@example.com

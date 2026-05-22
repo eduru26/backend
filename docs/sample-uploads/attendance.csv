@@ -1,0 +1,11 @@
+date,student_handle,status
+2026-05-04,S001,present
+2026-05-04,S002,late
+2026-05-04,S003,absent
+2026-05-04,S004,present
+2026-05-04,S005,present
+2026-05-05,S001,present
+2026-05-05,S002,present
+2026-05-05,S003,present
+2026-05-05,S004,absent
+2026-05-05,S005,late
