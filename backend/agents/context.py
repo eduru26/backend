@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.models import (
-    Assessment, Attendance, ParentStudent, Question, QuestionResponse,
+    Assessment, Attendance, Chapter, ParentStudent, Question, QuestionResponse,
     Student, Subject, Topic,
 )
 from backend.agents.state import MentorState
@@ -126,6 +126,7 @@ class ContextAgent:
                 QuestionResponse.marks_obtained,
                 Question.max_marks,
                 Topic.name.label("topic"),
+                Chapter.name.label("chapter"),
                 Subject.name.label("subject"),
                 Assessment.assessment_date,
                 Assessment.title.label("assessment_title"),
@@ -133,6 +134,8 @@ class ContextAgent:
             .join(Question, QuestionResponse.question_id == Question.id)
             .join(Topic, Question.topic_id == Topic.id)
             .join(Subject, Topic.subject_id == Subject.id)
+            # LEFT JOIN — topics without a chapter still contribute scores.
+            .outerjoin(Chapter, Topic.chapter_id == Chapter.id)
             .join(Assessment, Question.assessment_id == Assessment.id)
             .where(QuestionResponse.student_id == student_id)
             .order_by(Assessment.assessment_date)
@@ -143,6 +146,7 @@ class ContextAgent:
                 "student_id": str(student_id),
                 "subject": r.subject,
                 "topic": r.topic,
+                "chapter": r.chapter,   # None for unassigned topics
                 "marks_obtained": float(r.marks_obtained),
                 "max_marks": float(r.max_marks),
                 "date": str(r.assessment_date),

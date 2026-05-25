@@ -35,6 +35,25 @@ services:
       retries: 10
     restart: unless-stopped
 
+  # ── Qdrant — vector DB for textbook chunk retrieval ─────
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: ai_mentor_qdrant
+    ports:
+      - "6333:6333"   # REST API
+      - "6334:6334"   # gRPC
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      # the qdrant image ships no curl/wget — use a bash TCP probe.
+      # The indexer also polls /readyz client-side, which is the real guard.
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
   # ── Ollama (local LLM server) ───────────────────────────
   ollama:
     image: ollama/ollama:latest
@@ -46,6 +65,21 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      # ── Low-VRAM tuning for a 6 GB GPU ──────────────────
+      # Flash attention + q8 KV-cache roughly halve the memory the
+      # context window costs, so the 3B gen model and the embedding
+      # model both stay fully GPU-resident.
+      - OLLAMA_FLASH_ATTENTION=1
+      - OLLAMA_KV_CACHE_TYPE=q8_0
+      # Keep models warm for 30 min so chat turns don't pay a cold
+      # reload after a short idle gap.
+      - OLLAMA_KEEP_ALIVE=30m
+      # Two model slots = gen + embedding. Prevents Ollama loading a
+      # third model and overflowing VRAM.
+      - OLLAMA_MAX_LOADED_MODELS=2
+      # Serialise requests — parallel decode would contend for the
+      # limited VRAM and slow every turn down.
+      - OLLAMA_NUM_PARALLEL=1
     healthcheck:
       test: ["CMD-SHELL", "ollama list > /dev/null 2>&1"]
       interval: 10s
@@ -61,30 +95,40 @@ services:
               count: all
               capabilities: [gpu]
 
-  # ── Pull chat model (qwen2.5:7b) ───────────────────────
+  # ── Pull the generation model (OLLAMA_GEN_MODEL from .env) ──
   ollama-init:
     image: ollama/ollama:latest
     container_name: ai_mentor_ollama_init
     depends_on:
       ollama:
         condition: service_healthy
+    env_file:
+      - .env
     environment:
       OLLAMA_HOST: http://ollama:11434
-    entrypoint: ["/bin/ollama", "pull", "qwen2.5:7b"]
+    entrypoint:
+      - /bin/sh
+      - -c
+      - "/bin/ollama pull ${OLLAMA_GEN_MODEL:-qwen2.5:3b}"
     volumes:
       - ollama_data:/root/.ollama
     restart: "no"
 
-  # ── Pull Dr.Doc model (qwen2.5:3b) ─────────────────────
+  # ── Pull the Dr.Doc model (DR_DOC_MODEL from .env) ─────
   dr-doc-init:
     image: ollama/ollama:latest
     container_name: ai_mentor_dr_doc_init
     depends_on:
       ollama:
         condition: service_healthy
+    env_file:
+      - .env
     environment:
       OLLAMA_HOST: http://ollama:11434
-    entrypoint: ["/bin/ollama", "pull", "qwen2.5:3b"]
+    entrypoint:
+      - /bin/sh
+      - -c
+      - "/bin/ollama pull ${DR_DOC_MODEL:-qwen2.5:3b}"
     volumes:
       - ollama_data:/root/.ollama
     restart: "no"
@@ -167,6 +211,8 @@ services:
         condition: service_completed_successfully
       converter:
         condition: service_healthy
+      qdrant:
+        condition: service_healthy
     env_file:
       - .env
     environment:
@@ -177,6 +223,10 @@ services:
       REDIS_URL: redis://redis:6379/0
       REDIS_RATELIMIT_URL: redis://redis:6379/1
       REDIS_ARQ_URL: redis://redis:6379/2
+      QDRANT_URL: http://qdrant:6333
+      TEXTBOOK_STORAGE_PATH: /data/textbook_pdfs
+    volumes:
+      - textbook_pdfs:/data/textbook_pdfs
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
       interval: 10s
@@ -209,6 +259,8 @@ services:
         condition: service_completed_successfully
       ollama-embed-init:
         condition: service_completed_successfully
+      qdrant:
+        condition: service_healthy
     env_file:
       - .env
     environment:
@@ -218,10 +270,51 @@ services:
       CONVERTER_URL: http://converter:9000
       REDIS_URL: redis://redis:6379/0
       REDIS_ARQ_URL: redis://redis:6379/2
+      QDRANT_URL: http://qdrant:6333
     entrypoint: ["arq", "backend.worker.settings.WorkerSettings"]
     restart: unless-stopped
     deploy:
       replicas: 1
+
+  # ── ingest-worker — docling-based textbook PDF ingestion ───
+  # Separate from the main worker so docling's 2-3 GB of layout +
+  # OCR models stay off the chat / paper-gen replicas. Mounts the
+  # same textbook_pdfs volume as the backend so it can read files
+  # the admin upload endpoint writes there.
+  ingest-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.ingest-worker
+    container_name: ai_mentor_ingest_worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      ollama-embed-init:
+        condition: service_completed_successfully
+      qdrant:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://mentor:mentor@postgres:5432/ai_mentor
+      DATABASE_URL_SYNC: postgresql+psycopg://mentor:mentor@postgres:5432/ai_mentor
+      OLLAMA_BASE_URL: http://ollama:11434
+      REDIS_URL: redis://redis:6379/0
+      REDIS_ARQ_URL: redis://redis:6379/2
+      QDRANT_URL: http://qdrant:6333
+      TEXTBOOK_STORAGE_PATH: /data/textbook_pdfs
+    volumes:
+      - textbook_pdfs:/data/textbook_pdfs
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 4096M
 
   # ── nginx — API gateway + load balancer ───────────────────
   nginx:
@@ -246,3 +339,5 @@ volumes:
   postgres_data:
   ollama_data:
   redis_data:
+  qdrant_data:
+  textbook_pdfs:

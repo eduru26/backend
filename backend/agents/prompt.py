@@ -120,6 +120,8 @@ def _student_context(student: dict[str, Any], analytics: dict[str, Any]) -> str:
             "Subject scores: "
             + ", ".join(f"{s}: {p}%" for s, p in analytics["subject_pct"].items())
         )
+    if analytics.get("weak_chapters"):
+        lines.append("Weak chapters (below 60%): " + ", ".join(analytics["weak_chapters"][:4]))
     if analytics.get("weak_topics"):
         lines.append("Weak topics (below 60%): " + ", ".join(analytics["weak_topics"][:5]))
     if analytics.get("attendance_rate") is not None:

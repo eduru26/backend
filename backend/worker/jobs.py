@@ -92,3 +92,79 @@ async def lms_event_job(
     await handler(typed)
     logger.info("job.lms_event.done", slug=event_slug)
     return {"ok": True, "slug": event_slug}
+
+
+
+async def ingest_textbook_job(
+    ctx: dict, *, ingestion_id: str,
+) -> dict[str, Any]:
+    """Run the docling-based ingest pipeline for one uploaded PDF.
+
+    Stages: extracting → chunking → embedding → ready. On exception the
+    row is marked failed in a fresh session so the admin UI sees a
+    clear error rather than a row stuck in 'extracting' forever.
+
+    Lives in this module because it's a regular arq function, but the
+    dedicated ingest-worker service is the only worker that registers
+    it (see backend/worker/ingest_settings.py). Keeping it out of the
+    main worker prevents the docling 2-3 GB model load from bloating
+    every replica of the chat/paper-gen worker.
+    """
+    from backend.services.textbook_ingest import (
+        _IngestCancelled, mark_ingestion_failed, run_ingestion,
+    )
+
+    iid = uuid.UUID(ingestion_id)
+    factory = get_session_factory()
+    try:
+        async with factory() as session:
+            await run_ingestion(session, iid)
+            await session.commit()
+        return {"ingestion_id": ingestion_id, "status": "ready"}
+    except _IngestCancelled as exc:
+        # Admin cancelled or deleted the row mid-job. The status is
+        # already `cancelled` (or the row is gone) — don't overwrite
+        # it with `failed`.
+        logger.info("job.ingest_textbook.cancelled",
+                    ingestion_id=ingestion_id, reason=str(exc))
+        return {"ingestion_id": ingestion_id, "status": "cancelled"}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("job.ingest_textbook.failed",
+                         ingestion_id=ingestion_id, error=str(exc))
+        async with factory() as session:
+            await mark_ingestion_failed(session, iid, str(exc))
+        return {"ingestion_id": ingestion_id, "status": "failed",
+                "error": str(exc)[:500]}
+
+
+async def generate_paper_job(
+    ctx: dict, *, assessment_id: str
+) -> dict[str, Any]:
+    """Generate a question paper for an Assessment created in 'generating'
+    status. On any hard failure the paper is left as 'draft' with the
+    error recorded so the teacher can edit or regenerate."""
+    from backend.db.models import Assessment
+    from backend.services.paper_generator import PaperGenerator
+
+    aid = uuid.UUID(assessment_id)
+    factory = get_session_factory()
+    async with factory() as session:
+        try:
+            await PaperGenerator(session).generate(aid)
+            await session.commit()
+        except Exception as exc:  # noqa: BLE001
+            await session.rollback()
+            logger.exception("job.generate_paper.failed",
+                             assessment_id=assessment_id, error=str(exc))
+            # mark the paper draft with the error so the UI can surface it
+            async with factory() as s2:
+                a = await s2.get(Assessment, aid)
+                if a is not None:
+                    meta = dict(a.generation_meta or {})
+                    meta["error"] = str(exc)[:1000]
+                    a.generation_meta = meta
+                    a.status = "draft"
+                    await s2.commit()
+            return {"ok": False, "error": str(exc)}
+    logger.info("job.generate_paper.done", assessment_id=assessment_id)
+    return {"ok": True, "assessment_id": assessment_id}

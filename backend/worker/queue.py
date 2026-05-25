@@ -12,6 +12,14 @@ logger = get_logger(__name__)
 
 _pool: ArqRedis | None = None
 
+# Function-name → queue routing. Both workers live on the same Redis DB
+# (so we can share connections / dashboards), but they listen on
+# distinct queues so the main worker never picks up an ingest job it
+# can't execute, and vice versa. Default queue is `arq:queue`; the
+# ingest worker uses `arq:queue:ingest`.
+INGEST_QUEUE = "arq:queue:ingest"
+_INGEST_FUNCS = frozenset({"ingest_textbook_job"})
+
 
 def arq_redis_settings() -> RedisSettings:
     return RedisSettings.from_dsn(get_settings().redis_arq_url)
@@ -45,7 +53,15 @@ async def enqueue(func_name: str, *args: Any, **kwargs: Any) -> str | None:
     """
     try:
         pool = await get_arq()
-        job = await pool.enqueue_job(func_name, *args, **kwargs)
+        # Route ingest jobs onto the dedicated queue so the main worker
+        # never picks one up and silently drops it as an unknown
+        # function. All other jobs use arq's default queue.
+        if func_name in _INGEST_FUNCS:
+            job = await pool.enqueue_job(
+                func_name, *args, _queue_name=INGEST_QUEUE, **kwargs,
+            )
+        else:
+            job = await pool.enqueue_job(func_name, *args, **kwargs)
         if job is not None:
             logger.info("queue.enqueued", func=func_name, job_id=job.job_id)
             return job.job_id

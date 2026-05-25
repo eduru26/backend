@@ -4,12 +4,34 @@ from typing import Iterable
 
 import httpx
 
-from backend.core.circuit_breaker import get_breaker
+from backend.core.circuit_breaker import CircuitBreaker
 from backend.core.config import get_settings
 from backend.core.logging import get_logger
 from backend.core.redis_client import cache_get_vector, cache_key, cache_set_json
 
 logger = get_logger(__name__)
+
+# Below this size we stop trying to split an overflowing chunk.
+_MIN_RESILIENT_CHARS = 40
+_MAX_RESILIENT_DEPTH = 8
+
+
+class ContextLengthError(httpx.HTTPError):
+    """The text was longer than the embedding model's context window.
+
+    Subclasses httpx.HTTPError so existing broad handlers (chat endpoint,
+    etc.) still catch it cleanly. Raised distinctly so `embed_resilient`
+    can split-and-retry — this happens with non-Latin scripts (Kannada,
+    Hindi…) where a given character count tokenizes into many more
+    tokens than the equivalent English text.
+    """
+
+
+# Module-level breaker with ContextLengthError in `ignore`: a chunk being
+# too long is not a downstream-health signal — it's the input's fault —
+# so it must not count against the breaker (otherwise a single big
+# textbook upload could trip the circuit and kill chat embeddings).
+_embed_breaker = CircuitBreaker("ollama_embed", ignore=(ContextLengthError,))
 
 
 class EmbeddingClient:
@@ -45,7 +67,7 @@ class EmbeddingClient:
         if cached is not None and len(cached) == self._dim:
             return cached
 
-        vec = await get_breaker("ollama_embed").call(self._embed_impl, text)
+        vec = await _embed_breaker.call(self._embed_impl, text)
         await cache_set_json(key, vec, get_settings().cache_embedding_ttl_sec)
         return vec
 
@@ -66,7 +88,18 @@ class EmbeddingClient:
                     f"Ollama embed model '{self._model}' not loaded at {self._base}. "
                     f"Run `ollama pull {self._model}` to install it."
                 )
-            resp.raise_for_status()
+            if resp.status_code != 200:
+                body = resp.text[:300]
+                # 500 with "context length" / "exceeds the context" =
+                # input too long for the model. Distinct exception so
+                # embed_resilient can split-and-retry.
+                if (
+                    resp.status_code == 500
+                    and ("context length" in body.lower()
+                         or "exceeds the context" in body.lower())
+                ):
+                    raise ContextLengthError(body)
+                resp.raise_for_status()
             data = resp.json()
             vec = data.get("embedding") or []
             if len(vec) != self._dim:
@@ -76,6 +109,36 @@ class EmbeddingClient:
                     f"embedding dim mismatch: got {len(vec)}, expected {self._dim}"
                 )
             return [float(x) for x in vec]
+
+    async def embed_resilient(
+        self, text: str, *, _depth: int = 0
+    ) -> list[tuple[str, list[float]]]:
+        """Embed `text`, splitting it if the model rejects it as too long.
+
+        Returns a list of (text_piece, vector) pairs — normally one, but
+        more when a chunk had to be split because of context-window
+        overflow. The caller stores each pair as its own RagDocumentChunk
+        so no content is lost.
+        """
+        text = (text or "").strip()
+        if not text:
+            return []
+        try:
+            return [(text, await self.embed(text))]
+        except ContextLengthError:
+            if len(text) <= _MIN_RESILIENT_CHARS or _depth >= _MAX_RESILIENT_DEPTH:
+                raise
+            mid = len(text) // 2
+            window = max(20, len(text) // 6)
+            space = text.rfind(" ", max(0, mid - window), mid + window)
+            cut = space if space > 0 else mid
+            left, right = text[:cut].strip(), text[cut:].strip()
+            if not left or not right:
+                raise
+            return (
+                await self.embed_resilient(left, _depth=_depth + 1)
+                + await self.embed_resilient(right, _depth=_depth + 1)
+            )
 
     async def embed_batch(self, texts: Iterable[str]) -> list[list[float]]:
         # Ollama's embeddings endpoint is single-prompt today; we serialise

@@ -2,7 +2,10 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# No apt deps needed — psycopg[binary] and bcrypt both ship pre-compiled wheels
+# No apt deps needed — psycopg[binary] and bcrypt both ship pre-compiled
+# wheels. Textbook ingestion (docling) runs in the dedicated
+# ingest-worker image (Dockerfile.ingest-worker), so this image stays
+# slim — no Tesseract / poppler / docling here.
 
 # ── Install Python deps (cached unless pyproject.toml changes) ──
 COPY pyproject.toml .

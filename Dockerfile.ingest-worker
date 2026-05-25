@@ -1,0 +1,65 @@
+# Ingest worker — runs docling on uploaded textbook PDFs and embeds the
+# extracted chunks into Qdrant. Separate image (not the slim backend
+# image) so the 2-3 GB of docling models stay off the chat / paper-gen
+# worker replicas.
+#
+# docling's OCR stack (easyocr → opencv-python) needs a handful of
+# X11/GL shared libraries even when we install opencv-python-headless
+# first — libxcb.so.1, libGL.so.1, libgomp.so.1, etc. They're not
+# fetched transitively because they live in the system, not on PyPI.
+#
+# apt mirrors are switched to HTTPS up-front: many networks (corporate
+# proxies, restricted Docker hosts) block port 80 outbound to
+# deb.debian.org but allow 443. Modern apt has TLS built in, no
+# apt-transport-https package needed.
+
+FROM python:3.11-slim-bookworm
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_DEFAULT_TIMEOUT=120 \
+    PIP_NO_CACHE_DIR=1
+WORKDIR /app
+
+RUN set -eux; \
+    # Bookworm slim uses the deb822-style file; older bases used
+    # /etc/apt/sources.list — handle both so the swap is portable
+    # across base-image updates.
+    for f in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do \
+        if [ -f "$f" ]; then \
+            sed -i 's|http://deb.debian.org|https://deb.debian.org|g; \
+                    s|http://security.debian.org|https://security.debian.org|g' "$f"; \
+        fi; \
+    done; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        libgl1 \
+        libglib2.0-0 \
+        libgomp1 \
+        libsm6 \
+        libxext6 \
+        libxrender1 \
+        libxcb1; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*
+
+# ── Python deps ──────────────────────────────────────────────────
+COPY pyproject.toml .
+RUN mkdir -p backend && touch backend/__init__.py
+RUN pip install -e .
+
+# Install opencv-python-headless BEFORE docling so docling's transitive
+# opencv install resolves to the headless variant. Both packages
+# provide the cv2 module — headless skips the GUI runtime (GTK/Qt)
+# while still requiring the X11 system libs we installed above.
+RUN pip install "opencv-python-headless>=4.10"
+
+# docling pulls a heavy ML stack (transformers, torch, onnxruntime,
+# easyocr). Loose pin so we can bump backend deps without re-resolving
+# the layout model versions.
+RUN pip install "docling>=2.0"
+
+# ── Application source ──────────────────────────────────────────
+COPY backend/ backend/
+COPY alembic.ini .
+
+ENTRYPOINT ["arq", "backend.worker.ingest_settings.IngestWorkerSettings"]

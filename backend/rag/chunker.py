@@ -14,6 +14,14 @@ _PARA_BREAK = re.compile(r"\n{2,}")
 _SENT_BREAK = re.compile(r"(?<=[.!?])\s+")
 
 
+def _hard_split(text: str, size: int, overlap: int) -> list[str]:
+    """Last-resort splitter for a run of text with no paragraph or sentence
+    break points (poems, tables, OCR blobs) — slices it into fixed `size`
+    windows so no chunk can overflow the embedding model's context."""
+    step = max(1, size - overlap)
+    return [text[i:i + size] for i in range(0, len(text), step)]
+
+
 def chunk_text(
     text: str,
     *,
@@ -41,9 +49,17 @@ def chunk_text(
     for para in paragraphs:
         if len(para) <= target_chars:
             units.append(para)
-        else:
-            sentences = _SENT_BREAK.split(para)
-            units.extend(s.strip() for s in sentences if s.strip())
+            continue
+        for sentence in _SENT_BREAK.split(para):
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            if len(sentence) <= target_chars:
+                units.append(sentence)
+            else:
+                # a sentence/run longer than the target — force-split so no
+                # chunk can overflow the embedder's context window
+                units.extend(_hard_split(sentence, target_chars, overlap_chars))
 
     chunks: list[str] = []
     buf = ""

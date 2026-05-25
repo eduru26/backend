@@ -12,9 +12,12 @@ from backend.api.admin import router as admin_router
 from backend.api.announcements import router as announcements_router
 from backend.api.auth import router as auth_router
 from backend.api.chat import router as chat_router
+from backend.api.curriculum import router as curriculum_router
 from backend.api.ingest import router as ingest_router
 from backend.api.lms_events import router as lms_events_router
 from backend.api.notifications import router as notifications_router
+from backend.api.qp_templates import router as qp_templates_router
+from backend.api.question_papers import router as question_papers_router
 from backend.api.rag_documents import router as rag_documents_router
 from backend.api.school_admin import router as school_admin_router
 from backend.api.school_analytics import router as school_analytics_router
@@ -120,6 +123,9 @@ def create_app() -> FastAPI:
     app.include_router(admin_router)
     app.include_router(school_admin_router)
     app.include_router(school_analytics_router)
+    app.include_router(curriculum_router)
+    app.include_router(qp_templates_router)
+    app.include_router(question_papers_router)
     app.include_router(academic_year_router)
     app.include_router(teacher_mgmt_router)
     app.include_router(ingest_router)

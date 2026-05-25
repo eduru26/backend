@@ -41,6 +41,9 @@ _DEFAULT_VIS: dict[str, list[str]] = {
     "assignment":   ["teacher", "student"],
     "note":         ["public"],
     "upload":       ["public"],
+    # Textbooks are staff-only — paper generation retrieves them
+    # server-side; students must not pull raw textbook chunks via chat.
+    "textbook":     ["teacher", "school_admin"],
 }
 
 
@@ -109,32 +112,39 @@ class RagIngestService:
             return IngestResult(str(doc.id), 0, False)
 
         embedder = get_embedder()
-        vectors = await embedder.embed_batch(chunks)
+        # Per-chunk embed with adaptive split-and-retry: a chunk that exceeds
+        # the embedder's context window is split into smaller pieces, each
+        # stored as its own RagDocumentChunk so no content is lost.
+        # `running` is the chunk_index — required because one chunk may
+        # become multiple records.
+        running = 0
+        for chunk in chunks:
+            pairs = await embedder.embed_resilient(chunk)
+            for piece_text, vec in pairs:
+                self._session.add(RagDocumentChunk(
+                    id=uuid.uuid4(),
+                    document_id=doc.id,
+                    tenant_id=tenant_id,
+                    chunk_index=running,
+                    content=piece_text,
+                    embedding=vec,
+                    role_visibility=vis,
+                    student_id=student_id,
+                    classroom_id=classroom_id,
+                    subject=subject,
+                    topic=topic,
+                    chunk_metadata=metadata or {},
+                ))
+                running += 1
 
-        for i, (c_text, vec) in enumerate(zip(chunks, vectors)):
-            self._session.add(RagDocumentChunk(
-                id=uuid.uuid4(),
-                document_id=doc.id,
-                tenant_id=tenant_id,
-                chunk_index=i,
-                content=c_text,
-                embedding=vec,
-                role_visibility=vis,
-                student_id=student_id,
-                classroom_id=classroom_id,
-                subject=subject,
-                topic=topic,
-                chunk_metadata=metadata or {},
-            ))
-
-        doc.chunk_count = len(chunks)
+        doc.chunk_count = running
         await self._session.flush()
 
         logger.info(
             "rag.ingest.indexed",
-            document_id=str(doc.id), kind=kind, chunks=len(chunks),
+            document_id=str(doc.id), kind=kind, chunks=running,
         )
-        return IngestResult(str(doc.id), len(chunks), False)
+        return IngestResult(str(doc.id), running, False)
 
     # ── reindex existing DB content as RAG ─────────────────
 

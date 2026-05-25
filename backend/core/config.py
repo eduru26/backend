@@ -28,10 +28,30 @@ class Settings(BaseSettings):
     jwt_access_token_ttl_min: int = 60
 
     ollama_base_url: str = "http://localhost:11434"
-    ollama_gen_model: str = "qwen2.5:7b"
-    ollama_embed_model: str = "nomic-embed-text"
+    # qwen2.5:3b — benchmark-selected (scripts/bench_llm.py): fits a 6 GB GPU
+    # fully, ~1.7 s/turn, perfect grounding + PASS/FAIL validation.
+    ollama_gen_model: str = "qwen2.5:3b"
+    ollama_embed_model: str = "nomic-embed-text-v2-moe"
     ollama_timeout_sec: int = 120
     ollama_temperature: float = 0.0
+    # Context window + output caps. num_ctx must hold the largest assembled
+    # prompt; num_predict bounds the generation (responses target ≤300 words).
+    ollama_num_ctx: int = 4096
+    ollama_num_predict: int = 512
+    # Validation only needs to emit PASS/FAIL — a tiny cap makes that call cheap.
+    ollama_validation_num_predict: int = 8
+
+    # Paper-gen grounding thresholds (cosine similarity of question+answer
+    # to retrieved textbook chunks). Below `min_sim` → reject outright;
+    # between `min_sim` and `judge_high` → escalate to LLM judge; at or
+    # above `judge_high` → accept without judge.
+    grounding_min_sim: float = 0.45
+    grounding_judge_high: float = 0.60
+
+    # Shared Docker volume where uploaded textbook PDFs land. Both the
+    # backend (writes on upload) and the ingest-worker (reads on docling
+    # run) mount this same path so the file shows up on both sides.
+    textbook_storage_path: str = "/data/textbook_pdfs"
 
     pipeline_max_validation_retries: int = 2
     pipeline_cold_start_min_questions: int = 5
@@ -43,6 +63,14 @@ class Settings(BaseSettings):
     root_cause_weak_fundamentals_pct: float = 0.70
 
     vector_dim: int = 768
+
+    # ----- Qdrant (textbook chunks for paper generation) ---------------
+    # Backend writes school-admin-uploaded textbooks here; teacher's paper
+    # generator queries this collection. Separate from the pgvector store
+    # which holds chat-RAG content (announcements/assignments/notes).
+    qdrant_url: str = "http://qdrant:6333"
+    qdrant_collection: str = "textbook_chunks"
+    qdrant_upsert_batch: int = 64
 
     # ----- Redis (caching + rate limiting + arq queue) -----------------
     # db 0: app cache, db 1: rate-limit counters, db 2: arq job queue.

@@ -43,6 +43,10 @@ def extract_text(blob: bytes) -> str:
     except Exception as exc:  # noqa: BLE001 — bubble as a clean error
         raise PdfUnsupportedError(f"could not parse PDF: {exc}") from exc
 
+    return _extract_from_reader(reader)
+
+
+def _extract_from_reader(reader) -> str:
     pages: list[str] = []
     for i, page in enumerate(reader.pages[:MAX_PAGES]):
         try:

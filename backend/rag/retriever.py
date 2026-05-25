@@ -71,6 +71,7 @@ class Retriever:
         *,
         k: int = DEFAULT_K,
         kinds: list[str] | None = None,
+        subject: str | None = None,
     ) -> list[RetrievedChunk]:
         q = (query or "").strip()
         if not q:
@@ -87,7 +88,7 @@ class Retriever:
             kinds = _kinds_for_intent(intent)
 
         sql, params = self._build_hybrid_query(
-            qvec=qvec, query_text=q, identity=identity, kinds=kinds,
+            qvec=qvec, query_text=q, identity=identity, kinds=kinds, subject=subject,
         )
 
         result = await self._session.execute(sql, params)
@@ -145,9 +146,14 @@ class Retriever:
         query_text: str,
         identity: IdentityClaims,
         kinds: list[str] | None,
+        subject: str | None = None,
     ):
         scope_clause, scope_params = self._scope_clause(identity)
         kind_clause, kind_params = self._kind_clause(kinds)
+        # Optional subject narrowing — used by question-paper generation to
+        # pull only the chosen subject's textbook chunks.
+        subject_clause = "AND c.subject = :subject" if subject else ""
+        subject_params = {"subject": subject} if subject else {}
 
         # Filter block is identical for both retrieval arms — same RBAC
         # enforcement, same kind narrowing, same scope. The two arms only
@@ -157,6 +163,7 @@ class Retriever:
               AND c.role_visibility && :role_vis
               {scope_clause}
               {kind_clause}
+              {subject_clause}
         """
 
         if qvec is not None:
@@ -229,6 +236,7 @@ class Retriever:
             "overfetch": self.OVERFETCH,
             **scope_params,
             **kind_params,
+            **subject_params,
         }
         if qvec is not None:
             params["qvec"] = qvec

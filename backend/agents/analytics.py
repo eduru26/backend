@@ -32,6 +32,7 @@ class AnalyticsAgent:
     ) -> dict[str, Any]:
         subj: dict[str, dict[str, float]] = {}
         topic: dict[str, dict[str, float]] = {}
+        chapter: dict[str, dict[str, float]] = {}
 
         for r in scores:
             s, t = r["subject"], r["topic"]
@@ -42,12 +43,24 @@ class AnalyticsAgent:
             topic.setdefault(key, {"obt": 0.0, "max": 0.0})
             topic[key]["obt"] += r["marks_obtained"]
             topic[key]["max"] += r["max_marks"]
+            # Chapter rollup — only for topics linked into a curriculum tree.
+            ch = r.get("chapter")
+            if ch:
+                ckey = f"{s} > {ch}"
+                chapter.setdefault(ckey, {"obt": 0.0, "max": 0.0})
+                chapter[ckey]["obt"] += r["marks_obtained"]
+                chapter[ckey]["max"] += r["max_marks"]
 
         subject_pct = {s: _pct(v["obt"], v["max"]) for s, v in subj.items()}
         topic_pct = {k: _pct(v["obt"], v["max"]) for k, v in topic.items()}
+        chapter_pct = {k: _pct(v["obt"], v["max"]) for k, v in chapter.items()}
         weak_topics = sorted(
             [k for k, v in topic_pct.items() if v < 60.0],
             key=lambda k: topic_pct[k],
+        )
+        weak_chapters = sorted(
+            [k for k, v in chapter_pct.items() if v < 60.0],
+            key=lambda k: chapter_pct[k],
         )
 
         total_obt = sum(v["obt"] for v in subj.values())
@@ -62,7 +75,9 @@ class AnalyticsAgent:
             "overall_pct": overall,
             "subject_pct": subject_pct,
             "topic_pct": topic_pct,
+            "chapter_pct": chapter_pct,
             "weak_topics": weak_topics,
+            "weak_chapters": weak_chapters,
             "attendance_rate": att_rate,
             "total_questions_attempted": len(scores),
             "total_attendance_days": total_att,

@@ -4,6 +4,7 @@ import re
 from typing import Any
 
 from backend.agents.state import MentorState
+from backend.core.config import get_settings
 from backend.llm.ollama import get_ollama
 
 _SYSTEM = (
@@ -54,7 +55,12 @@ class ValidationAgent:
             f"AI RESPONSE:\n{response}\n\n"
             "Does the AI response contradict or fabricate data? Reply PASS or FAIL."
         )
-        verdict = await ollama.complete(_SYSTEM, check)
+        # The judge only emits PASS/FAIL — cap output tokens so this second
+        # per-turn LLM call returns fast instead of generating a full answer.
+        verdict = await ollama.complete(
+            _SYSTEM, check,
+            num_predict=get_settings().ollama_validation_num_predict,
+        )
         passed = "PASS" in verdict.upper()
         return {
             "validation_passed": passed,
