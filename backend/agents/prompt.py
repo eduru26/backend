@@ -26,11 +26,16 @@ _SYSTEM: dict[str, str] = {
         "cite a retrieved passage, reference it as [#N]. Keep your response under 300 words."
     ),
     "school_admin": (
-        "You are an AI advisor to a school administrator. Use ONLY the aggregated data and "
-        "retrieved context provided to surface trends, risks, and opportunities across the school. "
-        "Do not name individual students unless explicitly asked. Never invent numbers, names, or "
-        "facts. When you cite a retrieved passage, reference it as [#N]. Keep your response under "
-        "300 words."
+        "You are an AI advisor to a school administrator. "
+        "Answer the administrator's question directly and factually using ONLY the DATA CONTEXT provided. "
+        "The DATA CONTEXT contains the exact list of teachers, students, and grades enrolled at the school — "
+        "trust it completely. If the DATA CONTEXT shows teachers, name them and their details. "
+        "Never say 'there are no teachers' or 'no data' when the DATA CONTEXT lists them. "
+        "Be crisp: answer what was asked, nothing more. "
+        "Do not name individual students unless explicitly asked. "
+        "Never invent numbers, names, or facts not present in the data. "
+        "When you cite a retrieved passage, reference it as [#N]. "
+        "Keep your response under 150 words."
     ),
 }
 
@@ -49,7 +54,13 @@ class PromptAgent:
         # 1. structured data context (only present if ContextAgent ran)
         if state.get("requires_structured", True):
             sid = state.get("student_id")
-            if role in ("teacher", "school_admin") and not sid:
+            if role == "school_admin" and not sid:
+                structured = _admin_context(
+                    state.get("teachers") or [],
+                    state.get("students") or [],
+                    analytics,
+                )
+            elif role == "teacher" and not sid:
                 structured = _teacher_context(analytics)
             else:
                 student = next(
@@ -128,6 +139,57 @@ def _student_context(student: dict[str, Any], analytics: dict[str, Any]) -> str:
         lines.append(f"Attendance rate: {analytics['attendance_rate']}%")
     if not analytics.get("total_questions_attempted"):
         lines.append("Note: No assessment data has been uploaded yet.")
+    return "\n".join(lines)
+
+
+def _admin_context(
+    teachers: list[dict[str, Any]],
+    students: list[dict[str, Any]],
+    analytics: dict[str, Any],
+) -> str:
+    lines: list[str] = []
+
+    # ── Teacher roster ───────────────────────────────────────
+    lines.append(f"TEACHER ROSTER: {len(teachers)} teacher(s) enrolled.")
+    for i, t in enumerate(teachers, 1):
+        row = f"  {i}. {t['name']}"
+        if t.get("specialization"):
+            row += f" | Specialization: {t['specialization']}"
+        assignments = t.get("subject_assignments") or []
+        hc = t.get("home_classroom")
+        if assignments:
+            grades = "; ".join(
+                f"Grade {a['grade']}{a['section']} — {a['subject']}" for a in assignments
+            )
+            row += f" | Assigned grades: {grades}"
+        elif hc:
+            row += f" | Assigned grade: Grade {hc['grade']}{hc['section']} ({hc['name']})"
+        else:
+            row += " | No classroom assigned yet"
+        lines.append(row)
+
+    # ── Student roster ───────────────────────────────────────
+    student_count = len(students)
+    lines.append(f"\nSTUDENT ROSTER: {student_count} student(s) enrolled.")
+    _MAX_STUDENTS = 50  # cap prompt size for large schools
+    for i, s in enumerate(students[:_MAX_STUDENTS], 1):
+        lines.append(
+            f"  {i}. {s['name']} | Grade {s['grade']}{s.get('section', '')}"
+        )
+    if student_count > _MAX_STUDENTS:
+        lines.append(f"  ... and {student_count - _MAX_STUDENTS} more students.")
+
+    # ── Performance aggregate (only if data exists) ──────────
+    at_risk = analytics.get("at_risk_students") or []
+    if at_risk:
+        names = ", ".join(f"{s['name']} ({s['overall_pct']}%)" for s in at_risk[:5])
+        lines.append(f"\nAt-risk students ({len(at_risk)}): {names}")
+    if analytics.get("class_subject_avg"):
+        lines.append(
+            "School subject averages: "
+            + ", ".join(f"{s}: {p}%" for s, p in analytics["class_subject_avg"].items())
+        )
+
     return "\n".join(lines)
 
 

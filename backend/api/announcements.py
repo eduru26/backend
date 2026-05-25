@@ -268,8 +268,16 @@ async def update_announcement(
     )
     if not a or a.tenant_id != tenant_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "not found")
-    if user.role is not UserRole.school_admin and a.author_id != user.id:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "cannot edit others' announcements")
+
+    is_author = a.author_id == user.id
+    is_content_edit = payload.title is not None or payload.body is not None
+
+    # School admins may toggle pin on any announcement (display action only).
+    # Editing content (title / body) is restricted to the author regardless of role.
+    if is_content_edit and not is_author:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "only the author can edit announcement content")
+    if not is_content_edit and not is_author and user.role is not UserRole.school_admin:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "cannot pin others' announcements")
 
     if payload.title is not None:
         a.title = payload.title
@@ -296,8 +304,8 @@ async def delete_announcement(
     a = await session.get(Announcement, aid)
     if not a or a.tenant_id != tenant_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "not found")
-    if user.role is not UserRole.school_admin and a.author_id != user.id:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "cannot delete others' announcements")
+    if a.author_id != user.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "only the author can delete their announcement")
 
     # Tidy up the fan-out notifications so users don't see dangling entries.
     await session.execute(

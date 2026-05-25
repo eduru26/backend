@@ -33,6 +33,16 @@ _SYSTEM = (
     "Given a user role and their question, return a single JSON object: "
     '{"intent": "<one of the allowed intents>"}. '
     "No prose, no markdown, no code fences. Pick the BEST single intent.\n\n"
+    "Critical distinctions:\n"
+    "  - pii_request: ONLY when the user explicitly asks for personal contact info "
+    "(phone number, home address, email address, Aadhaar, SSN, date of birth). "
+    "A school_admin asking for student details, a list of students, or complete student "
+    "records is school_aggregate — NOT pii_request.\n"
+    "  - cross_student_query: ONLY when a student or parent asks about a different "
+    "student. Never applies to teacher or school_admin roles.\n"
+    "  - school_aggregate: school_admin asking about enrolled students, teachers, "
+    "grades, or any school-wide data.\n"
+    "  - class_aggregate: teacher or admin asking about a specific class or section.\n\n"
     "Allowed intents:\n"
     + "\n".join(f"  - {i.value}" for i in _INTENT_VOCAB)
 )
@@ -91,6 +101,22 @@ class LLMIntentClassifier:
         intent = _parse_intent(verdict, _INTENT_VOCAB)
         if intent is None:
             logger.info("intent.llm.unparseable", raw=verdict[:120])
+            return rules
+
+        # Safety invariant: the LLM is allowed to disambiguate between
+        # non-adversarial intents, but it must NEVER escalate a query to an
+        # adversarial intent (pii_request / prompt_injection / cross_student_query)
+        # when the rule classifier didn't already flag it. The rule-based
+        # classifier is the sole authoritative source for safety blocks — the
+        # LLM is too prone to false-positives (e.g. classifying "give complete
+        # details about students" as pii_request for a school_admin).
+        _ADVERSARIAL = {Intent.pii_request, Intent.prompt_injection, Intent.cross_student_query}
+        if intent in _ADVERSARIAL and rules.intent not in _ADVERSARIAL:
+            logger.info(
+                "intent.llm.adversarial_override_rejected",
+                llm_intent=intent.value,
+                rules_intent=rules.intent.value,
+            )
             return rules
 
         # Replace the rules result with the LLM verdict; mark how we got

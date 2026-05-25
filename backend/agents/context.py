@@ -7,8 +7,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.db.models import (
-    Assessment, Attendance, Chapter, ParentStudent, Question, QuestionResponse,
-    Student, Subject, Topic,
+    Assessment, Attendance, Chapter, Classroom, ParentStudent, Question,
+    QuestionResponse, Student, Subject, TeacherSubjectAssignment, Topic, User,
+    UserRole,
 )
 from backend.agents.state import MentorState
 
@@ -24,6 +25,8 @@ class ContextAgent:
             return await self._student_context(state, tid)
         if role == "parent":
             return await self._parent_context(state, tid)
+        if role == "school_admin":
+            return await self._admin_context(state, tid)
         return await self._teacher_context(state, tid)
 
     # ── per-role fetchers ───────────────────────────────────
@@ -105,6 +108,68 @@ class ContextAgent:
                 all_att.extend(await self._get_attendance(s.id))
 
         return {"students": students, "raw_scores": all_scores, "raw_attendance": all_att}
+
+    async def _admin_context(self, state: MentorState, tid: uuid.UUID) -> dict[str, Any]:
+        # Fetch all active teachers in this school
+        t_result = await self._session.execute(
+            select(User)
+            .where(User.tenant_id == tid, User.role == UserRole.teacher, User.is_active.is_(True))
+            .order_by(User.full_name)
+        )
+        teachers = list(t_result.scalars().all())
+
+        # Home-room classroom assignments (one classroom → one home teacher)
+        c_result = await self._session.execute(
+            select(Classroom).where(Classroom.tenant_id == tid).order_by(Classroom.grade, Classroom.section)
+        )
+        classrooms = list(c_result.scalars().all())
+        home_class_by_teacher: dict[uuid.UUID, Classroom] = {
+            c.teacher_id: c for c in classrooms if c.teacher_id
+        }
+
+        # Subject teaching assignments (TeacherSubjectAssignment)
+        tsa_result = await self._session.execute(
+            select(TeacherSubjectAssignment, Classroom)
+            .join(Classroom, TeacherSubjectAssignment.classroom_id == Classroom.id)
+            .where(TeacherSubjectAssignment.tenant_id == tid)
+        )
+        tsa_by_teacher: dict[uuid.UUID, list[dict[str, Any]]] = {}
+        for tsa, cls in tsa_result.all():
+            tsa_by_teacher.setdefault(tsa.teacher_id, []).append(
+                {"subject": tsa.subject, "grade": cls.grade, "section": cls.section, "classroom": cls.name}
+            )
+
+        teacher_info: list[dict[str, Any]] = []
+        for t in teachers:
+            hc = home_class_by_teacher.get(t.id)
+            teacher_info.append({
+                "id": str(t.id),
+                "name": t.full_name or "(unnamed)",
+                "specialization": t.specialization,
+                "home_classroom": {"name": hc.name, "grade": hc.grade, "section": hc.section} if hc else None,
+                "subject_assignments": tsa_by_teacher.get(t.id, []),
+            })
+
+        # Student aggregate (reuse teacher-context logic for class-wide stats)
+        stmt = select(Student).where(Student.tenant_id == tid).order_by(Student.full_name)
+        s_result = await self._session.execute(stmt)
+        all_students = list(s_result.scalars().all())
+        students = [
+            {"id": str(s.id), "name": s.full_name, "grade": s.grade, "section": s.section}
+            for s in all_students
+        ]
+        all_scores: list[dict[str, Any]] = []
+        all_att: list[dict[str, Any]] = []
+        for s in all_students:
+            all_scores.extend(await self._get_scores(s.id))
+            all_att.extend(await self._get_attendance(s.id))
+
+        return {
+            "teachers": teacher_info,
+            "students": students,
+            "raw_scores": all_scores,
+            "raw_attendance": all_att,
+        }
 
     # ── DB query helpers ────────────────────────────────────
 

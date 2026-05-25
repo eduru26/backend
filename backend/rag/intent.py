@@ -88,7 +88,15 @@ _CLASS_KEYWORDS = [
 
 _SCHOOL_AGG_KEYWORDS = [
     "school", "grade-wide", "across grades", "all classes", "overall school",
-    "teacher performance", "all teachers",
+    "teacher performance", "all teachers", "how many teachers", "how many staff",
+    "list of teachers", "list teachers", "teacher specializ", "teacher assigned",
+    "grades assigned", "assigned grades", "assigned to", "who teaches",
+    "teacher roster", "staff roster", "teacher", "teachers", "staff",
+    # student roster queries from admin
+    "how many students", "list of students", "list students", "student roster",
+    "all students", "student details", "complete details", "full details",
+    "enrolled students", "student list", "students enrolled", "student info",
+    "give details", "show details", "student count",
 ]
 
 _CURRICULUM_KEYWORDS = [

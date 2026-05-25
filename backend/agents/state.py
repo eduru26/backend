@@ -43,6 +43,7 @@ class MentorState(TypedDict):
     students: list[dict[str, Any]]        # [{id, name, grade, section}]
     raw_scores: list[dict[str, Any]]      # [{student_id, subject, topic, marks_obtained, max_marks, date}]
     raw_attendance: list[dict[str, Any]]  # [{student_id, date, status}]
+    teachers: list[dict[str, Any]]        # [{id, name, specialization, home_classroom, subject_assignments}] — admin only
 
     # ── analytics (AnalyticsAgent) ──────────────────────────
     analytics: dict[str, Any]
